@@ -143,7 +143,12 @@ BUILDDIR := build/$(PLATFORM)
 
 # Platform-specific directory creation
 ifeq ($(OS),Windows_NT)
+# On Windows, prefer POSIX-style mkdir when running under MSYS/MinGW shells
+ifneq ($(MSYSTEM),)
+MKDIR = mkdir -p $1
+else
 MKDIR = if not exist "$(subst /,\,$1)" mkdir "$(subst /,\,$1)"
+endif
 else
 MKDIR = mkdir -p $1
 endif
@@ -217,7 +222,11 @@ $(BUILDDIR)/test/ardop/test_log: WRAP := fopen fclose fwrite fflush freopen
 $(BUILDDIR)/test/ardop/test_ARDOPCommon_processargs: WRAP := \
 	printf puts ardop_log_start InitAudio \
 	GetCM108Strlist GetSerialStrlist updateWebGuiNonAudioConfig \
-	OpenCOMPort tcpconnect OpenCM108 OpenSoundCapture OpenSoundPlayback \
+	OpenCOMPort tcpconnect OpenCM108 OpenSoundCapture OpenSoundPlayback
+ifneq ($(WIN32),)
+# MinGW maps printf/puts to __mingw_printf/__mingw_puts when ANSI stdio is enabled
+$(BUILDDIR)/test/ardop/test_ARDOPCommon_processargs: WRAP += __mingw_printf __mingw_puts
+endif
 
 # Implicit rules to build object files in build directory
 $(BUILDDIR)/%.o: %.c
@@ -234,11 +243,18 @@ $(BUILDDIR)/%.o: %.c
 # related files that must then be manually deleted.
 
 ifeq ($(OS),Windows_NT)
-# on Windows, use rmdir for directories
+ifneq ($(MSYSTEM),)
+clean :
+	rm -rf $(BUILDDIR)
+cleanall :
+	rm -rf build
+else
+# on native cmd.exe shells, use rmdir for directories
 clean :
 	@if exist "$(subst /,\,$(BUILDDIR))" rmdir /S /Q "$(subst /,\,$(BUILDDIR))"
 cleanall :
 	@if exist build rmdir /S /Q build
+endif
 else
 clean :
 	rm -rf $(BUILDDIR)
