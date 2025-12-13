@@ -78,6 +78,13 @@ OBJS_LIN = \
 	$(BUILDDIR)/src/linux/ALSA.o \
 	$(BUILDDIR)/src/linux/os_util.o \
 
+# macOS-only object files (stubs for initial scaffolding)
+OBJS_MAC = \
+	$(BUILDDIR)/src/macos/CoreAudioSound.o \
+	$(BUILDDIR)/src/macos/MacSerial.o \
+	$(BUILDDIR)/src/macos/MacCM108.o \
+	$(BUILDDIR)/src/macos/os_util.o \
+
 # Windows-only object files
 OBJS_WIN = \
 	$(BUILDDIR)/src/windows/Waveform.o \
@@ -87,8 +94,8 @@ OBJS_WIN = \
 OBJS_EXE = \
 	$(BUILDDIR)/src/common/ardopcf.o \
 
-# unit test executables
-TESTS = \
+# Base (all-platform unless filtered later) test executables
+TESTS_COMMON = \
 	$(BUILDDIR)/test/ardop/test_ARDOPCommon \
 	$(BUILDDIR)/test/ardop/test_HostInterface \
 	$(BUILDDIR)/test/ardop/test_Locator \
@@ -98,6 +105,15 @@ TESTS = \
 	$(BUILDDIR)/test/ardop/test_ARDOPCommon_processargs \
 	$(BUILDDIR)/test/ardop/test_eutf8 \
 	$(BUILDDIR)/test/ardop/test_txframe \
+
+# macOS-only tests
+TESTS_MAC = \
+	$(BUILDDIR)/test/ardop/test_mac_CoreAudioSound \
+	$(BUILDDIR)/test/ardop/test_mac_MacSerial \
+	$(BUILDDIR)/test/ardop/test_mac_os_util \
+
+# Aggregate TESTS (will filter below per platform)
+TESTS = $(TESTS_COMMON)
 
 # unit test common code
 TEST_OBJS_COMMON = \
@@ -113,9 +129,21 @@ endef
 CPPFLAGS += -Isrc -Ilib
 CFLAGS = -g -MMD
 LDLIBS = -lm -lpthread
-LDFLAGS = -Xlinker -Map=$(BUILDDIR)/output.map
+LDFLAGS =
 CC = gcc
 CC_NATIVE ?= $(CC)
+
+# Optional overrides for cmocka include and library paths (default empty).
+# Users on macOS with Homebrew can set, e.g.:
+#   make CMOCKA_INC=/opt/homebrew/include CMOCKA_LIB=/opt/homebrew/lib test
+CMOCKA_INC ?=
+CMOCKA_LIB ?=
+ifneq ($(strip $(CMOCKA_INC)),)
+CPPFLAGS += -I$(CMOCKA_INC)
+endif
+ifneq ($(strip $(CMOCKA_LIB)),)
+LDFLAGS += -L$(CMOCKA_LIB)
+endif
 
 # How to wrap a symbol with ld
 LDWRAP := -Wl,--wrap=
@@ -128,18 +156,71 @@ TXT2C ?=
 WIN32 ?= $(filter $(OS),Windows_NT)
 
 # Determine build directory based on target platform
+UNAME_S := $(shell uname -s)
 ifneq ($(WIN32),)
 PLATFORM := windows
 OBJS += $(OBJS_WIN)
 LDLIBS += -lwsock32 -lwinmm -lsetupapi -lws2_32 -lhid
 else
+ifeq ($(UNAME_S),Darwin)
+PLATFORM := macos
+OBJS += $(OBJS_MAC)
+# Apple CoreAudio frameworks (no new external deps)
+LDLIBS += -framework AudioToolbox -framework AudioUnit -framework CoreAudio -framework CoreFoundation
+# Add IOKit for HID (CM108) support
+LDLIBS += -framework IOKit
+# macOS: include mac-only tests
+TESTS += $(TESTS_MAC)
+else
 PLATFORM := linux
 OBJS += $(OBJS_LIN)
 LDLIBS += -lrt -lasound
 endif
+endif
 
 # Build directory structure
 BUILDDIR := build/$(PLATFORM)
+
+# Detect Homebrew-installed cmocka on macOS and add include/lib paths so tests build
+ifeq ($(PLATFORM),macos)
+CMOCKA_HEADER := $(firstword $(wildcard /opt/homebrew/include/cmocka.h /usr/local/include/cmocka.h))
+ifneq ($(CMOCKA_HEADER),)
+	CMOCKA_INCDIR := $(dir $(CMOCKA_HEADER))
+	# Prefer matching lib directory to the header location
+	ifneq ($(wildcard /opt/homebrew/lib/libcmocka.dylib),)
+		CMOCKA_LIBDIR := /opt/homebrew/lib
+	else ifneq ($(wildcard /usr/local/lib/libcmocka.dylib),)
+		CMOCKA_LIBDIR := /usr/local/lib
+	endif
+	CPPFLAGS += -I$(CMOCKA_INCDIR)
+	ifneq ($(CMOCKA_LIBDIR),)
+		LDLIBS += -L$(CMOCKA_LIBDIR)
+	endif
+else
+	# If cmocka isn't present, tests will fail to compile; provide a hint when invoking test targets
+	ifneq (,$(filter test buildtest,$(MAKECMDGOALS)))
+		$(info NOTE: cmocka not found under /opt/homebrew or /usr/local. Install with: brew install cmocka)
+	endif
+endif
+endif
+
+# macOS: exclude wrap-dependent test_log until cmocka & wrap semantics validated
+ifeq ($(PLATFORM),macos)
+# Remove wrap-dependent tests
+TESTS := $(filter-out $(BUILDDIR)/test/ardop/test_log,$(TESTS))
+TESTS := $(filter-out $(BUILDDIR)/test/ardop/test_ARDOPCommon_processargs,$(TESTS))
+LDWRAP :=
+else ifeq ($(PLATFORM),linux)
+# Exclude macOS-only tests on Linux
+TESTS := $(filter-out $(BUILDDIR)/test/ardop/test_CoreAudioSound,$(TESTS))
+# MacSerial presently targets macOS APIs (util.h); exclude on Linux for now
+TESTS := $(filter-out $(BUILDDIR)/test/ardop/test_MacSerial,$(TESTS))
+else ifeq ($(PLATFORM),windows)
+# Exclude POSIX-specific tests on Windows
+TESTS := $(filter-out $(BUILDDIR)/test/ardop/test_CoreAudioSound,$(TESTS))
+TESTS := $(filter-out $(BUILDDIR)/test/ardop/test_MacSerial,$(TESTS))
+TESTS := $(filter-out $(BUILDDIR)/test/ardop/test_mac_os_util,$(TESTS))
+endif
 
 # Platform-specific directory creation
 ifeq ($(OS),Windows_NT)
@@ -155,10 +236,26 @@ endif
 
 all: ardopcf
 
+# AddressSanitizer / malloc debug (enable with `make ASAN=1`)
+ifeq ($(ASAN),1)
+ifneq ($(PLATFORM),windows)
+CFLAGS += -fsanitize=address -fno-omit-frame-pointer
+LDFLAGS += -fsanitize=address
+# Encourage early detection of heap issues for macOS (export when running)
+# Example run:
+#   MallocScribble=1 MallocPreScribble=1 MallocGuardEdges=1 ./build/$(PLATFORM)/ardopcf 8515
+endif
+endif
+
 ardopcf: $(BUILDDIR)/ardopcf
 
 $(BUILDDIR)/ardopcf: $(OBJS_EXE) $(OBJS)
-	$(CC) $(LDFLAGS) $^ -o $@ $(LOADLIBES) $(LDLIBS)
+	# macOS ld64 rejects -Map option; only use map file on non-macOS
+	@if [ "$(PLATFORM)" = "macos" ]; then \
+		$(CC) $(LDFLAGS) $^ -o $@ $(LOADLIBES) $(LDLIBS); \
+	else \
+		$(CC) $(LDFLAGS) -Xlinker -Map=$(BUILDDIR)/output.map $^ -o $@ $(LOADLIBES) $(LDLIBS); \
+	fi
 
 # if txt2c is not provided, build it
 ifeq ($(TXT2C),)
@@ -188,6 +285,7 @@ $(BUILDDIR)/src/common/gen-%.c:: webgui/% | $(TXT2C)
 buildtest: $(TESTS)
 
 # `make test` prints the name of each test file and then runs that test.
+# On macOS, install cmocka via: brew install cmocka.
 # running the test should indicate the tests run and whether they passed
 # or failed.
 test: buildtest
@@ -199,12 +297,12 @@ $(BUILDDIR)/test/ardop/test_%: test/ardop/test_%.c $(OBJS) $(TEST_OBJS_COMMON)
 	$(CC) \
 		$(CPPFLAGS) \
 		$(CFLAGS) \
-		$(LDFLAGS) \
-		$(patsubst %,$(LDWRAP)%,$(WRAP)) \
+		$(if $(LDWRAP),$(patsubst %,$(LDWRAP)%,$(WRAP))) \
 		$< \
 		$(OBJS) \
 		$(TEST_OBJS_COMMON) \
 		-o $@ \
+		$(LDFLAGS) \
 		$(LOADLIBES) \
 		$(LDLIBS) \
 		-lcmocka

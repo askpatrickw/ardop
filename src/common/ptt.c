@@ -1216,12 +1216,20 @@ size_t EncodeDeviceStrlist(char *dst, int dstsize, char **ss, char **cs) {
 // to recieve.  If none of the methods for locally controlling PTT are set, then
 // send commands to the host program which it may use to control PTT.
 void KeyPTT(bool state) {
-	bool done = false;
+		bool done = false;
+		ZF_LOGI("KeyPTT called: state=%s, PTTmode=0x%02X", state ? "TRUE" : "FALSE", PTTmode);
+#if defined(__APPLE__)
+	// Track which backend successfully handled this PTT change (serial RTS/DTR vs HID CM108)
+	enum { PTT_BACKEND_NONE, PTT_BACKEND_RTS, PTT_BACKEND_DTR, PTT_BACKEND_CM108 } used_backend = PTT_BACKEND_NONE;
+#endif
 
 	if (PTTmode & PTTRTS) {
 		if (state) {
 			if (COMSetRTS(hPTTdevice)) {
 				done = true;
+#if defined(__APPLE__)
+				used_backend = PTT_BACKEND_RTS;
+#endif
 			} else {
 				ZF_LOGE("Error setting RTS %s in KeyPTT(true).", PTTstr);
 				close_PTT(true);
@@ -1229,6 +1237,9 @@ void KeyPTT(bool state) {
 		} else {
 			if (COMClearRTS(hPTTdevice)) {
 				done = true;
+#if defined(__APPLE__)
+				used_backend = PTT_BACKEND_RTS;
+#endif
 			} else {
 				ZF_LOGE("Error clearing RTS %s in KeyPTT(true).", PTTstr);
 				close_PTT(true);
@@ -1239,6 +1250,9 @@ void KeyPTT(bool state) {
 		if (state) {
 			if (COMSetDTR(hPTTdevice)) {
 				done = true;
+#if defined(__APPLE__)
+				used_backend = PTT_BACKEND_DTR;
+#endif
 			} else {
 				ZF_LOGE("Error setting DTR %s in KeyPTT(true).", PTTstr);
 				close_PTT(true);
@@ -1246,6 +1260,9 @@ void KeyPTT(bool state) {
 		} else {
 			if (COMClearDTR(hPTTdevice)) {
 				done = true;
+#if defined(__APPLE__)
+				used_backend = PTT_BACKEND_DTR;
+#endif
 			} else {
 				ZF_LOGE("Error clearing DTR %s in KeyPTT(true).", PTTstr);
 				close_PTT(true);
@@ -1289,6 +1306,9 @@ void KeyPTT(bool state) {
 	if (PTTmode & PTTCM108) {
 		if (CM108_set_ptt(hCM108device, state) == 0) {
 			done = true;
+#if defined(__APPLE__)
+			used_backend = PTT_BACKEND_CM108;
+#endif
 		} else {
 			ZF_LOGE("Error setting CM108 device %s in KeyPTT(%s).",
 				PTTstr, state ? "true" : "false");
@@ -1309,7 +1329,26 @@ void KeyPTT(bool state) {
 			SendCommandToHostQuiet("PTT TRUE");
 		else
 			SendCommandToHostQuiet("PTT FALSE");
+#if defined(__APPLE__)
+		ZF_LOGW("PTT %s requested but no local serial or HID device active.", state ? "assert" : "release");
+#endif
 	}
+#if defined(__APPLE__)
+	else {
+		// Successful local handling; provide INFO level state + backend summary
+		const char *backend_str = "unknown";
+		const char *type_str = "serial"; // default type label
+		switch (used_backend) {
+		case PTT_BACKEND_RTS: backend_str = "RTS"; break;
+		case PTT_BACKEND_DTR: backend_str = "DTR"; break;
+		case PTT_BACKEND_CM108: backend_str = "CM108"; type_str = "HID"; break;
+		default: backend_str = "none"; break;
+		}
+		if (used_backend != PTT_BACKEND_NONE) {
+			ZF_LOGI("PTT %s via %s %s backend (%s)", state ? "asserted" : "released", type_str, backend_str, PTTstr[0] ? PTTstr : "unspecified");
+		}
+	}
+#endif
 	ZF_LOGD("[Main.KeyPTT]  PTT-%s", state ? "TRUE" : "FALSE");
 	SetLED(0, state);
 	wg_send_pttled(0, state);

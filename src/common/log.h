@@ -37,7 +37,13 @@
  * Set long enough to log the maximum 1024 bytes of data that is encoded in
  * any data frame as hex with spaces between bytes (so 3 printed bytes per data
  * byte) plus with some margin.
+ *
+ * We force the buffer to 4 KiB (matching our vendored zf_log build) so that a
+ * single frame dump, including decoration, can be formatted without truncation.
+ * The larger buffer costs ~4 KiB of stack per call site, but the decode WAV and
+ * modem diagnostics rely on the extra headroom to avoid excessive chunking.
  */
+#undef ZF_LOG_BUF_SZ
 #define ZF_LOG_BUF_SZ 4000
 
 /* UTC log timestamps */
